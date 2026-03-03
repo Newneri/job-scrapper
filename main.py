@@ -49,7 +49,7 @@ CONFIG = {
 
     # ── Filtres optionnels ─────────────────────
     "max_age_days": 20,          # offres publiées il y a moins de N jours
-    "exclude_keywords": ["senior", "lead", "manager", "6 mois", "sénior", "CDI", "CDD", "5 ans", "3 ans"], # ex. ["senior", "10 ans d'expérience"]
+    "exclude_keywords": ["senior", "lead", "manager", "6 mois", "sénior", "CDI", "CDD", "5 ans", "3 ans", "alternance"], # ex. ["senior", "10 ans d'expérience"]
 
     # ── Email ──────────────────────────────────
     "email": {
