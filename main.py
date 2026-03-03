@@ -11,6 +11,7 @@ Usage :
   (ou planifier via cron : 0 8 * * * python /chemin/job_scraper.py)
 """
 
+import os
 import requests
 from bs4 import BeautifulSoup
 import smtplib
@@ -25,6 +26,14 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 import logging
 from dotenv import load_dotenv
+import cloudscraper
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
 
@@ -33,14 +42,14 @@ load_dotenv()
 # ─────────────────────────────────────────────
 CONFIG = {
     # ── Critères de recherche ──────────────────
-    "keywords": ["stage informatique", "stage développeur", "stage software engineer"],
+    "keywords": ["stage informatique", "stage développeur", "stage software engineer", "stage data analyst", "stage web", "stage programmation"],  # mots-clés à rechercher
     "location": "Pau",          # ou "Paris", "Remote", etc.
-    "contract_type": "stage",   # stage | alternance | cdi | cdd
+    "contract_type": "internship",   # stage | alternance | cdi | cdd
     "radius_km": 50,            # rayon autour de la localisation
 
     # ── Filtres optionnels ─────────────────────
     "max_age_days": 20,          # offres publiées il y a moins de N jours
-    "exclude_keywords": ["senior", "lead", "manager"], # ex. ["senior", "10 ans d'expérience"]
+    "exclude_keywords": ["senior", "lead", "manager", "6 mois", "sénior", "CDI", "CDD", "5 ans", "3 ans"], # ex. ["senior", "10 ans d'expérience"]
 
     # ── Email ──────────────────────────────────
     "email": {
@@ -122,11 +131,13 @@ def save_cache(path: str, seen: set):
 #  SCRAPERS
 # ─────────────────────────────────────────────
 
+scraper = cloudscraper.create_scraper()
+
+
 def _get(url: str, **kwargs) -> Optional[BeautifulSoup]:
-    """HTTP GET avec retry et délai aléatoire."""
     try:
         time.sleep(random.uniform(1.5, 3.5))
-        r = requests.get(url, headers=HEADERS, timeout=15, **kwargs)
+        r = scraper.get(url, headers=HEADERS, timeout=15, **kwargs)
         r.raise_for_status()
         return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
@@ -134,49 +145,77 @@ def _get(url: str, **kwargs) -> Optional[BeautifulSoup]:
         return None
 
 
+def get_driver():
+    options = Options()
+    options.add_argument("--headless")  # mode sans interface graphique
+    options.add_argument("--no-sandbox")    
+    options.add_argument("--disable-dev-shm-usage") 
+    options.add_argument(f"user-agent={HEADERS['User-Agent']}") 
+    options.add_argument("--disable-blink-features=AutomationControlled") 
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_argument("--log-level=3")           # ← désactive les logs Chrome
+    options.add_experimental_option("excludeSwitches", ["enable-logging"])  # ← Windows surtout
+
+    # Silencer webdriver-manager
+    os.environ["WDM_LOG"] = "0"
+
+    service = Service(ChromeDriverManager().install())
+    service.log_path = os.devnull  # ← redirige les logs du driver vers /dev/null
+
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
 def scrape_indeed(keyword: str, location: str, pages: int = 3) -> List[Job]:
     jobs = []
-    for page in range(pages):
-        url = (
-            f"https://fr.indeed.com/jobs"
-            f"?q={requests.utils.quote(keyword)}"
-            f"&l={requests.utils.quote(location)}"
-            f"&fromage={CONFIG['max_age_days']}"
-            f"&start={page * 10}"
-        )
-        soup = _get(url)
-        if not soup:
-            continue
+    driver = get_driver()
 
-        for card in soup.select("div.job_seen_beacon, li.css-5lfssm"):
-            try:
-                title_el = card.select_one("h2.jobTitle span, h2 a span")
-                company_el = card.select_one("span.companyName, [data-testid='company-name']")
-                loc_el = card.select_one("div.companyLocation, [data-testid='text-location']")
-                link_el = card.select_one("h2.jobTitle a, h2 a")
-                date_el = card.select_one("span.date, [data-testid='myJobsStateDate']")
+    try:
+        for page in range(pages):
+            url = (
+                f"https://fr.indeed.com/jobs"
+                f"?q={requests.utils.quote(keyword)}"
+                f"&l={requests.utils.quote(location)}"
+                f"&jt={CONFIG['contract_type']}"
+                f"&radius={CONFIG['radius_km']}"
+                f"&fromage={CONFIG['max_age_days']}"
+                f"&start={page * 10}"
+            )
+            driver.get(url)
+            time.sleep(random.uniform(2, 4))  # laisser la page charger
 
-                if not title_el or not link_el:
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+
+            for card in soup.select("div.job_seen_beacon"):
+                try:
+                    title_el = card.select_one("h2.jobTitle span")
+                    company_el = card.select_one("span.companyName, [data-testid='company-name']")
+                    loc_el = card.select_one("div.companyLocation, [data-testid='text-location']")
+                    link_el = card.select_one("h2.jobTitle a")
+                    date_el = card.select_one("span.date, [data-testid='myJobsStateDate']")
+
+                    if not title_el or not link_el:
+                        continue
+
+                    href = link_el.get("href", "")
+                    if href.startswith("/"):
+                        href = "https://fr.indeed.com" + href
+
+                    jobs.append(Job(
+                        title=title_el.get_text(strip=True),
+                        company=company_el.get_text(strip=True) if company_el else "N/A",
+                        location=loc_el.get_text(strip=True) if loc_el else location,
+                        url=href,
+                        source="Indeed",
+                        date=date_el.get_text(strip=True) if date_el else "",
+                    ))
+                except Exception:
                     continue
 
-                href = link_el.get("href", "")
-                if href.startswith("/"):
-                    href = "https://fr.indeed.com" + href
-
-                jobs.append(Job(
-                    title=title_el.get_text(strip=True),
-                    company=company_el.get_text(strip=True) if company_el else "N/A",
-                    location=loc_el.get_text(strip=True) if loc_el else location,
-                    url=href,
-                    source="Indeed",
-                    date=date_el.get_text(strip=True) if date_el else "",
-                ))
-            except Exception:
-                continue
+    finally:
+        driver.quit()
 
     log.info(f"  Indeed        → {len(jobs)} offres pour « {keyword} »")
     return jobs
-
 
 def scrape_hellowork(keyword: str, location: str, pages: int = 3) -> List[Job]:
     jobs = []
